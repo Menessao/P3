@@ -1056,6 +1056,99 @@ class fourierModel:
         self.t_aliasingPSD = 1000 * (time.time() - tstart)
         return self.freq.mskInAO_ * psd * self.ao.atm.r0**(-5/3) * 0.0229
 
+    # def aliasingPSD(self):
+    #     """
+    #     Aliasing error power spectrum density (OOMAO-compatible)
+    #     Works for both Shack-Hartmann and Pyramid WFS
+    #     """
+    #     tstart = time.time()
+        
+    #     fc = self.freq.kcMax_
+    #     psd = np.zeros((self.freq.resAO, self.freq.resAO), dtype=self.dtype)
+        
+    #     i = self.complex_dtype(1j)
+    #     kxAO = self.freq.kxAO_.ravel()
+    #     kyAO = self.freq.kyAO_.ravel()
+        
+    #     # Get reconstructor response
+    #     if not hasattr(self, 'Rx'):
+    #         self.reconstructionFilter()
+        
+    #     w = 2 * i * np.pi * self.ao.wfs.optics[0].dsub
+    #     Rx = self.Rx.ravel() * w
+    #     Ry = self.Ry.ravel() * w
+        
+    #     # Initialize aliasing accumulator
+    #     al = np.zeros_like(Rx, dtype=self.complex_dtype)
+    #     nv = np.arange(-5, 6)
+        
+    #     # Loop case 1: Both l and m non-zero
+    #     for l in nv:
+    #         flx = kxAO - 2*l*fc
+    #         for m in nv:
+    #             if l != 0 and m != 0:
+    #                 fmy = kyAO - 2*m*fc
+    #                 flm = np.hypot(flx, fmy)
+    #                 # Atmospheric spectrum at aliased frequencies
+    #                 W_mn = self.ao.atm.spectrum(flm)
+    #                 # Direction factors using both Rx and Ry
+    #                 # Avoid division by zero
+    #                 with np.errstate(divide='ignore', invalid='ignore'):
+    #                     direction_factor = np.where(
+    #                         (flx != 0) & (fmy != 0),
+    #                         (kxAO / fmy + kyAO / flx) ** 2,
+    #                         0.0
+    #                     )
+    #                 Q = Rx * flx + Ry * fmy
+    #                 al += 0.25 * direction_factor * W_mn * Q
+        
+    #     # Loop case 2: l = 0 (fmy varies, flx = kxAO)
+    #     flx = kxAO
+    #     for m in nv:
+    #         if m != 0:
+    #             fmy = kyAO - 2*m*fc
+    #             flm = np.hypot(flx, fmy)
+    #             W_mn = self.ao.atm.spectrum(flm)
+    #             # When flx == 0, direction factor is 0; otherwise apply full formula
+    #             with np.errstate(divide='ignore', invalid='ignore'):
+    #                 direction_factor = np.where(
+    #                     (flx != 0) & (fmy != 0),
+    #                     (kxAO / fmy + kyAO / flx) ** 2,
+    #                     0.0
+    #                 )
+    #             Q = Rx * flx + Ry * fmy
+    #             al += 0.25 * direction_factor * W_mn * Q
+        
+    #     # Loop case 3: m = 0 (flx varies, fmy = kyAO)
+    #     fmy = kyAO
+    #     for l in nv:
+    #         if l != 0:
+    #             flx = kxAO - 2*l*fc
+    #             flm = np.hypot(flx, fmy)
+    #             W_mn = self.ao.atm.spectrum(flm)
+    #             # When fmy == 0, direction factor is 0; otherwise apply full formula
+    #             with np.errstate(divide='ignore', invalid='ignore'):
+    #                 direction_factor = np.where(
+    #                     (flx != 0) & (fmy != 0),
+    #                     (kxAO / fmy + kyAO / flx) ** 2,
+    #                     0.0
+    #                 )
+    #             Q = Rx * flx + Ry * fmy
+    #             al += 0.25 * direction_factor * W_mn * Q
+        
+    #     psd = np.reshape(np.abs(al) ** 2, self.Rx.shape)
+        
+    #     # Apply piston filter and mask
+    #     piston_filter = FourierUtils.pistonFilter(self.ao.tel.D, np.sqrt(self.freq.k2AO_), dtype=self.dtype)
+    #     psd *= piston_filter * self.freq.mskInAO_
+        
+    #     # Apply closed-loop transfer function if available
+    #     if hasattr(self, 'h1'):
+    #         psd *= abs(self.h1)
+        
+    #     self.t_aliasingPSD = 1000 * (time.time() - tstart)
+    #     return psd * self.ao.atm.r0**(-5/3) * 0.0229
+
     def noisePSD(self):
         """Noise error power spectrum density
         """
