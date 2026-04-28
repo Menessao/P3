@@ -1,0 +1,5 @@
+- tps influence functions (aoSystem.deformableMirror)
+- modulation dependant flux
+- true fitting error (IFs, analytical KL)
+- temporal aspect of aliasing
+- OGC optical gains
