@@ -936,135 +936,15 @@ class fourierModel:
         self.t_fittingPSD = 1000*(time.time() - tstart)
         return psd
 
-    # def aliasingPSD(self):
-    #     """
-    #     Aliasing error power spectrum density
-    #     Memory-optimized with GPU-aware vectorized implementation
-    #     TO BE REVIEWED IN THE CASE OF A PYRAMID WFS
-    #     """
-    #     tstart = time.time()
-    #     psd = np.zeros((self.freq.resAO, self.freq.resAO),
-    #                    dtype=self.dtype)
-    #     i = self.complex_dtype(1j)
-    #     d = self.ao.wfs.optics[0].dsub
-    #     clock_rate = np.array([self.ao.wfs.detector[j].clock_rate for j in range(self.nGs)])
-    #     T = np.mean(clock_rate / self.ao.rtc.holoop['rate'])
-    #     td = T * self.ao.rtc.holoop['delay']
-    #     vx = self.ao.atm.wSpeed * nnp.cos(self.ao.atm.wDir * np.pi / 180)
-    #     vy = self.ao.atm.wSpeed * nnp.sin(self.ao.atm.wDir * np.pi / 180)
-    #     weights = self.ao.atm.weights
-    #     w = 2 * i * np.pi * d
-
-    #     if not hasattr(self, 'Rx'):
-    #         self.reconstructionFilter()
-    #     Rx = self.Rx * w
-    #     Ry = self.Ry * w
-
-    #     if self.ao.rtc.holoop['gain'] == 0:
-    #         tf = 1
-    #     else:
-    #         tf = self.h1
-
-    #     # Create grid of frequency shifts
-    #     mi, ni = np.meshgrid(
-    #         np.arange(-self.freq.nTimes, self.freq.nTimes),
-    #         np.arange(-self.freq.nTimes, self.freq.nTimes),
-    #         indexing="ij"
-    #     )
-    #     # Mask to exclude (0,0) shift
-    #     mask = (mi != 0) | (ni != 0)
-    #     mi = mi[:, :, None]  # Shape (nShifts, nShifts, 1)
-    #     ni = ni[:, :, None]
-
-    #     # Frequency arrays (flatten to 1D for clean broadcasting)
-    #     kxAO = self.freq.kxAO_.ravel()  # Shape (K,)
-    #     kyAO = self.freq.kyAO_.ravel()
-
-    #     # Shifted frequencies (broadcasts to: nShifts x nShifts x K)
-    #     km = kxAO[None, None, :] - mi / d
-    #     kn = kyAO[None, None, :] - ni / d
-
-    #     NN = self.Rx.shape
-
-    #     # Piston filter
-    #     PR = FourierUtils.pistonFilter(
-    #         self.ao.tel.D,
-    #         np.hypot(km, kn),
-    #         fm=mi[:, :, None] / d,
-    #         fn=ni[:, :, None] / d,
-    #         dtype=self.dtype
-    #     )
-
-    #     # Atmospheric spectrum
-    #     W_mn = (km**2 + kn**2 + 1 / self.ao.atm.L0**2) ** (-11 / 6)
-
-    #     # Reconstructor (reshape for broadcasting)
-    #     Rx = Rx.ravel()[None, None, :]  # Shape (1, 1, K)
-    #     Ry = Ry.ravel()[None, None, :]
-    #     # Q factor
-    #     Q = (Rx * km + Ry * kn) * (np.sinc(d * km) * np.sinc(d * kn))
-
-    #     tf_flat = np.asarray(tf.ravel()[None, None, :])
-
-    #     # **VECTORIZED CHUNKED PROCESSING**:
-    #     # Process layers in chunks with full vectorization
-    #     chunk_size = min(5, self.ao.atm.nL)  # Adjust chunk size
-    #     avr_sum = np.zeros((mi.shape[0], mi.shape[1], len(kxAO)),
-    #                        dtype=self.complex_dtype)
-
-    #     # Pre-allocate chunk array ONCE (fixed size, reused across iterations)
-    #     avr_chunk = np.zeros((chunk_size, mi.shape[0], mi.shape[1], len(kxAO)),
-    #                          dtype=self.complex_dtype)
-
-    #     for chunk_start in range(0, self.ao.atm.nL, chunk_size):
-    #         chunk_end = min(chunk_start + chunk_size, self.ao.atm.nL)
-    #         n_layers_chunk = chunk_end - chunk_start
-
-    #         # Reset chunk array to zero (reusing allocation)
-    #         avr_chunk.fill(0)
-
-    #         # **VECTORIZED COMPUTATION FOR ALL LAYERS IN CHUNK**
-    #         # Extract velocity components for this chunk
-    #         vx_chunk = vx[chunk_start:chunk_end]  # Shape: (n_layers_chunk,)
-    #         vy_chunk = vy[chunk_start:chunk_end]
-
-    #         # Broadcast to (n_layers_chunk, 1, 1, 1) for proper broadcasting
-    #         vx_bc = np.asarray(vx_chunk[:, None, None, None])
-    #         vy_bc = np.asarray(vy_chunk[:, None, None, None])
-
-    #         # Compute transfer function for all layers in chunk simultaneously
-    #         # Broadcasting: (n_layers_chunk, nShifts, nShifts, K)
-    #         avr_chunk[:n_layers_chunk] = (
-    #             np.sinc(km[None, :, :, :] * vx_bc * T) *
-    #             np.sinc(kn[None, :, :, :] * vy_bc * T) *
-    #             np.exp(2j * np.pi * (km[None, :, :, :] * vx_bc + kn[None, :, :, :] * vy_bc) * td) *
-    #             tf_flat[None, :, :, :]
-    #         )
-
-    #         # Weighted sum over ONLY the valid layers in this chunk
-    #         # For the last chunk, only sum over the first n_layers_chunk elements
-    #         weights_chunk = np.asarray(weights[chunk_start:chunk_end][:, None, None, None])
-    #         avr_sum += np.sum(weights_chunk * avr_chunk[:n_layers_chunk], axis=0)
-
-    #     # Free chunk memory
-    #     avr_chunk = None
-
-    #     # Compute aliasing PSD
-    #     psd = np.sum(PR * W_mn * np.abs(Q * avr_sum) ** 2 * mask[:, :, None], axis=(0, 1))
-    #     psd = np.reshape(psd, NN)
-
-    #     self.t_aliasingPSD = 1000 * (time.time() - tstart)
-    #     return self.freq.mskInAO_ * psd * self.ao.atm.r0**(-5/3) * 0.0229
-
-
     def aliasingPSD(self):
         """
         Aliasing error power spectrum density
         Memory-optimized with GPU-aware vectorized implementation
-        Adapted for Modulated Pyramid WFS
+        TO BE REVIEWED IN THE CASE OF A PYRAMID WFS
         """
         tstart = time.time()
-        psd = np.zeros((self.freq.resAO, self.freq.resAO), dtype=self.dtype)
+        psd = np.zeros((self.freq.resAO, self.freq.resAO),
+                       dtype=self.dtype)
         i = self.complex_dtype(1j)
         d = self.ao.wfs.optics[0].dsub
         clock_rate = np.array([self.ao.wfs.detector[j].clock_rate for j in range(self.nGs)])
@@ -1073,10 +953,13 @@ class fourierModel:
         vx = self.ao.atm.wSpeed * nnp.cos(self.ao.atm.wDir * np.pi / 180)
         vy = self.ao.atm.wSpeed * nnp.sin(self.ao.atm.wDir * np.pi / 180)
         weights = self.ao.atm.weights
+        w = 2 * i * np.pi * d
 
         if not hasattr(self, 'Rx'):
             self.reconstructionFilter()
-            
+        Rx = self.Rx * w
+        Ry = self.Ry * w
+
         if self.ao.rtc.holoop['gain'] == 0:
             tf = 1
         else:
@@ -1088,18 +971,22 @@ class fourierModel:
             np.arange(-self.freq.nTimes, self.freq.nTimes),
             indexing="ij"
         )
+        # Mask to exclude (0,0) shift
         mask = (mi != 0) | (ni != 0)
-        mi = mi[:, :, None]
+        mi = mi[:, :, None]  # Shape (nShifts, nShifts, 1)
         ni = ni[:, :, None]
 
-        kxAO = self.freq.kxAO_.ravel()
+        # Frequency arrays (flatten to 1D for clean broadcasting)
+        kxAO = self.freq.kxAO_.ravel()  # Shape (K,)
         kyAO = self.freq.kyAO_.ravel()
 
+        # Shifted frequencies (broadcasts to: nShifts x nShifts x K)
         km = kxAO[None, None, :] - mi / d
         kn = kyAO[None, None, :] - ni / d
 
         NN = self.Rx.shape
 
+        # Piston filter
         PR = FourierUtils.pistonFilter(
             self.ao.tel.D,
             np.hypot(km, kn),
@@ -1108,31 +995,14 @@ class fourierModel:
             dtype=self.dtype
         )
 
+        # Atmospheric spectrum
         W_mn = (km**2 + kn**2 + 1 / self.ao.atm.L0**2) ** (-11 / 6)
 
-        # Define modulation radius in spatial frequency (1/m). 
-        rMod = self.ao.wfs.optics[0].modulation
-        if rMod is None:
-            rMod = 0
-        alpha = rMod / self.ao.tel.D
-        
-        # Unmodulated PWFS fallback: if alpha is 0, use np.sign
-        if alpha == 0:
-            Hx_alias = i * np.sign(km)
-            Hy_alias = i * np.sign(kn)
-        else:
-            # Modulated PWFS: Fourier-domain saturated approximation
-            Hx_alias = (2 * i / np.pi) * np.arcsin(np.clip(km / alpha, -1.0, 1.0))
-            Hy_alias = (2 * i / np.pi) * np.arcsin(np.clip(kn / alpha, -1.0, 1.0))
-
         # Reconstructor (reshape for broadcasting)
-        Rx_flat = self.Rx.ravel()[None, None, :]
-        Ry_flat = self.Ry.ravel()[None, None, :]
-        
-        # Calculate Q using the PWFS transfer function, while keeping the 
-        # detector integration sinc terms valid for the physical CCD pixels.
-        Q = (Rx_flat * Hx_alias + Ry_flat * Hy_alias) * (np.sinc(d * km) * np.sinc(d * kn))
-        # ---------------------------------------------------------
+        Rx = Rx.ravel()[None, None, :]  # Shape (1, 1, K)
+        Ry = Ry.ravel()[None, None, :]
+        # Q factor
+        Q = (Rx * km + Ry * kn) * (np.sinc(d * km) * np.sinc(d * kn))
 
         tf_flat = np.asarray(tf.ravel()[None, None, :])
 
@@ -1185,6 +1055,136 @@ class fourierModel:
 
         self.t_aliasingPSD = 1000 * (time.time() - tstart)
         return self.freq.mskInAO_ * psd * self.ao.atm.r0**(-5/3) * 0.0229
+
+
+    # def aliasingPSD(self):
+    #     """
+    #     Aliasing error power spectrum density
+    #     Memory-optimized with GPU-aware vectorized implementation
+    #     Adapted for Modulated Pyramid WFS
+    #     """
+    #     tstart = time.time()
+    #     psd = np.zeros((self.freq.resAO, self.freq.resAO), dtype=self.dtype)
+    #     i = self.complex_dtype(1j)
+    #     d = self.ao.wfs.optics[0].dsub
+    #     clock_rate = np.array([self.ao.wfs.detector[j].clock_rate for j in range(self.nGs)])
+    #     T = np.mean(clock_rate / self.ao.rtc.holoop['rate'])
+    #     td = T * self.ao.rtc.holoop['delay']
+    #     vx = self.ao.atm.wSpeed * nnp.cos(self.ao.atm.wDir * np.pi / 180)
+    #     vy = self.ao.atm.wSpeed * nnp.sin(self.ao.atm.wDir * np.pi / 180)
+    #     weights = self.ao.atm.weights
+
+    #     if not hasattr(self, 'Rx'):
+    #         self.reconstructionFilter()
+            
+    #     if self.ao.rtc.holoop['gain'] == 0:
+    #         tf = 1
+    #     else:
+    #         tf = self.h1
+
+    #     # Create grid of frequency shifts
+    #     mi, ni = np.meshgrid(
+    #         np.arange(-self.freq.nTimes, self.freq.nTimes),
+    #         np.arange(-self.freq.nTimes, self.freq.nTimes),
+    #         indexing="ij"
+    #     )
+    #     mask = (mi != 0) | (ni != 0)
+    #     mi = mi[:, :, None]
+    #     ni = ni[:, :, None]
+
+    #     kxAO = self.freq.kxAO_.ravel()
+    #     kyAO = self.freq.kyAO_.ravel()
+
+    #     km = kxAO[None, None, :] - mi / d
+    #     kn = kyAO[None, None, :] - ni / d
+
+    #     NN = self.Rx.shape
+
+    #     PR = FourierUtils.pistonFilter(
+    #         self.ao.tel.D,
+    #         np.hypot(km, kn),
+    #         fm=mi[:, :, None] / d,
+    #         fn=ni[:, :, None] / d,
+    #         dtype=self.dtype
+    #     )
+
+    #     W_mn = (km**2 + kn**2 + 1 / self.ao.atm.L0**2) ** (-11 / 6)
+
+    #     # Define modulation radius in spatial frequency (1/m). 
+    #     rMod = self.ao.wfs.optics[0].modulation
+    #     if rMod is None:
+    #         rMod = 0
+    #     alpha = rMod / self.ao.tel.D
+        
+    #     # Unmodulated PWFS fallback: if alpha is 0, use np.sign
+    #     if alpha == 0:
+    #         Hx_alias = i * np.sign(km)
+    #         Hy_alias = i * np.sign(kn)
+    #     else:
+    #         # Modulated PWFS: Fourier-domain saturated approximation
+    #         Hx_alias = (2 * i / np.pi) * np.arcsin(np.clip(km / alpha, -1.0, 1.0))
+    #         Hy_alias = (2 * i / np.pi) * np.arcsin(np.clip(kn / alpha, -1.0, 1.0))
+
+    #     # Reconstructor (reshape for broadcasting)
+    #     Rx_flat = self.Rx.ravel()[None, None, :]
+    #     Ry_flat = self.Ry.ravel()[None, None, :]
+        
+    #     # Calculate Q using the PWFS transfer function, while keeping the 
+    #     # detector integration sinc terms valid for the physical CCD pixels.
+    #     Q = (Rx_flat * Hx_alias + Ry_flat * Hy_alias) * (np.sinc(d * km) * np.sinc(d * kn))
+    #     # ---------------------------------------------------------
+
+    #     tf_flat = np.asarray(tf.ravel()[None, None, :])
+
+    #     # **VECTORIZED CHUNKED PROCESSING**:
+    #     # Process layers in chunks with full vectorization
+    #     chunk_size = min(5, self.ao.atm.nL)  # Adjust chunk size
+    #     avr_sum = np.zeros((mi.shape[0], mi.shape[1], len(kxAO)),
+    #                        dtype=self.complex_dtype)
+
+    #     # Pre-allocate chunk array ONCE (fixed size, reused across iterations)
+    #     avr_chunk = np.zeros((chunk_size, mi.shape[0], mi.shape[1], len(kxAO)),
+    #                          dtype=self.complex_dtype)
+
+    #     for chunk_start in range(0, self.ao.atm.nL, chunk_size):
+    #         chunk_end = min(chunk_start + chunk_size, self.ao.atm.nL)
+    #         n_layers_chunk = chunk_end - chunk_start
+
+    #         # Reset chunk array to zero (reusing allocation)
+    #         avr_chunk.fill(0)
+
+    #         # **VECTORIZED COMPUTATION FOR ALL LAYERS IN CHUNK**
+    #         # Extract velocity components for this chunk
+    #         vx_chunk = vx[chunk_start:chunk_end]  # Shape: (n_layers_chunk,)
+    #         vy_chunk = vy[chunk_start:chunk_end]
+
+    #         # Broadcast to (n_layers_chunk, 1, 1, 1) for proper broadcasting
+    #         vx_bc = np.asarray(vx_chunk[:, None, None, None])
+    #         vy_bc = np.asarray(vy_chunk[:, None, None, None])
+
+    #         # Compute transfer function for all layers in chunk simultaneously
+    #         # Broadcasting: (n_layers_chunk, nShifts, nShifts, K)
+    #         avr_chunk[:n_layers_chunk] = (
+    #             np.sinc(km[None, :, :, :] * vx_bc * T) *
+    #             np.sinc(kn[None, :, :, :] * vy_bc * T) *
+    #             np.exp(2j * np.pi * (km[None, :, :, :] * vx_bc + kn[None, :, :, :] * vy_bc) * td) *
+    #             tf_flat[None, :, :, :]
+    #         )
+
+    #         # Weighted sum over ONLY the valid layers in this chunk
+    #         # For the last chunk, only sum over the first n_layers_chunk elements
+    #         weights_chunk = np.asarray(weights[chunk_start:chunk_end][:, None, None, None])
+    #         avr_sum += np.sum(weights_chunk * avr_chunk[:n_layers_chunk], axis=0)
+
+    #     # Free chunk memory
+    #     avr_chunk = None
+
+    #     # Compute aliasing PSD
+    #     psd = np.sum(PR * W_mn * np.abs(Q * avr_sum) ** 2 * mask[:, :, None], axis=(0, 1))
+    #     psd = np.reshape(psd, NN)
+
+    #     self.t_aliasingPSD = 1000 * (time.time() - tstart)
+    #     return self.freq.mskInAO_ * psd * self.ao.atm.r0**(-5/3) * 0.0229
 
     def noisePSD(self):
         """Noise error power spectrum density

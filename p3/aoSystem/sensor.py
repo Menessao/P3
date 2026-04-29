@@ -34,7 +34,6 @@ class sensor:
                               nSides=nSides,
                               wfstype=wfstype,
                               modulation=modulation) for k in range(self.nWfs)]
-        print(modulation)
 
         # detector class
         if type(nph)==float:
