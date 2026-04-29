@@ -1111,9 +1111,10 @@ class fourierModel:
         W_mn = (km**2 + kn**2 + 1 / self.ao.atm.L0**2) ** (-11 / 6)
 
         # Define modulation radius in spatial frequency (1/m). 
-        # You will need to fetch this from your WFS model config.
-        # Example: alpha = modulation_in_lambda_D / self.ao.tel.D
-        alpha = getattr(self.ao.wfs, 'modulation_radius', 1.0 / self.ao.tel.D) # Placeholder
+        rMod = self.ao.wfs.optics[0].modulation
+        if rMod is None:
+            rMod = 0
+        alpha = rMod / self.ao.tel.D
         
         # Unmodulated PWFS fallback: if alpha is 0, use np.sign
         if alpha == 0:
