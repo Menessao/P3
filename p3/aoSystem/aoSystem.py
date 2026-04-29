@@ -599,7 +599,6 @@ class aoSystem():
         else:
             self.addMcaoWFsensConeError = False
 
-        print(modu,nL,ron)
         self.wfs = sensor(psInMas, fov,
                           binning=Binning, spotFWHM=spotFWHM,
                           nph=nphHO, bandwidth=bw, transmittance=tr, dispersion=disp,

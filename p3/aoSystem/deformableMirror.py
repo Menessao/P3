@@ -95,53 +95,20 @@ class deformableMirror:
             SETINFLUENCEFUNCTION    
         """
         nIF = self.nActu1D[ndm]
-        # defining the spline functions
-        c  = 1/np.sqrt(np.log(1/self.mechCoupling[ndm]))
-        df = 1e-10
-        mx = np.sqrt(-np.log(df)*c**2)
-        r  = np.linspace(-mx,mx,1001)
-
-        if self.modes == 'gaussian':
-            f  = np.exp(-r**2/c**2)
-        elif self.modes == 'xinetics':
-            # defining main parameters
-            m = 0.180267421;
-            p = np.array([2.24506, 6.28464*m**2,-18.1956*m**4,31.2025*m**6,76.9336,-39.7956,m])
-            tmp     = -150*p[6]**8 * r** 8
-            w       = np.argwhere(r**8 < 1/(3*p[6]**8))
-            mask    = 0*tmp
-            mask[w] = np.exp(tmp[w])
-            # Define sub function
-            e  = (p[0] + p[1]*r**2 + p[2]*r**4 + p[3]*r**6)*mask
-            re = (abs(r)**e) * p[6]**e
-            # Get the influence function model
-            f  = np.exp(-p[4]*re)*(1 + p[5]*re)*mask
-
-        spline = interp.BSpline(r*self.pitch, f,3)
-
+        
         # managing the actuators positions
         if self.influenceCentre==0:
             xIF = np.linspace(-1,1,nIF)*(nIF-1)/2*self.pitch[ndm] - self.offset[ndm][0]
             yIF = np.linspace(-1,1,nIF)*(nIF-1)/2*self.pitch[ndm] - self.offset[ndm][1]
             xIF2,yIF2 = np.meshgrid(xIF,yIF)
             self.actuatorCoord = yIF2 + complex(0,1)*np.flip(xIF2,axis=0)                         
-            u0 = np.linspace(-1,1,resolution)*(nIF-1)/2*self.pitch
+            u0 = np.linspace(-1,1,resolution)*(nIF-1)/2*self.pitch[ndm]
         else:
             xIF = np.arange(0,nIF)
             yIF = np.arange(0,nIF)
             xIF2,yIF2 = np.meshgrid(xIF,yIF)
             self.actuatorCoord = xIF2 + complex(0,1)*yIF2
             u0 =  np.arange(0,nIF)       
-
-        u           = np.transpose([u0])- [xIF]
-        wu          = np.zeros((resolution,nIF), dtype=self.dtype)
-        index_u     = (u >= -r[len(r)-1]*self.pitch[ndm]) & (u <= r[len(r)-1]*self.pitch[ndm])
-        wu[index_u] = spline(u[index_u])
-
-        v           = np.transpose([u0])- [yIF]
-        wv          = np.zeros((resolution,nIF), dtype=self.dtype)
-        index_v     = (v >= -r[len(r)-1]*self.pitch[ndm]) & (v <= r[len(r)-1]*self.pitch[ndm])
-        wv[index_v] = spline(v[index_v])
 
         #m_modes = sparse.lil_matrix((resolution**2,self.nValidActuator))
         m_modes = np.zeros((resolution**2,self.nValidActuator[ndm]), dtype=self.dtype)
@@ -150,12 +117,99 @@ class deformableMirror:
         indIF[idx.ravel()] = []
         iIF,jIF = ind2sub((nIF,nIF),indIF)
         kIF = np.arange(0,self.nValidActuator[ndm])
-        wv = wv[:,iIF[kIF]]
-        wu = wu[:,jIF[kIF]]
+        
+        if self.modes == 'tps':
+            # Thin plate spline influence functions using Rbf
+            c  = 1/np.sqrt(np.log(1/self.mechCoupling[ndm]))
+            
+            # Create grid for evaluation
+            u0_grid, v0_grid = np.meshgrid(u0, u0)
+            eval_points_x = u0_grid.ravel()
+            eval_points_y = v0_grid.ravel()
+            
+            # For each valid actuator, create a thin plate spline influence function
+            for kIF_idx, kIF_val in enumerate(kIF):
+                # Get actuator position
+                i_act = iIF[kIF_val]
+                j_act = jIF[kIF_val]
+                x_act = xIF[i_act]
+                y_act = yIF[j_act]
+                
+                # Create training points around actuator with radial decay
+                # Use points on a radial grid with gaussian weighting
+                n_train = min(50, max(20, nIF*2))
+                theta = np.linspace(0, 2*np.pi, n_train, endpoint=False)
+                radii = np.linspace(0, 3*self.pitch[ndm], n_train//2)
+                
+                train_x = [x_act]  # Include actuator center
+                train_y = [y_act]
+                train_z = [1.0]    # Peak value at center
+                
+                for r in radii[1:]:
+                    for t in theta:
+                        x_train = x_act + r * np.cos(t)
+                        y_train = y_act + r * np.sin(t)
+                        # Gaussian falloff from peak
+                        z_train = np.exp(-(r**2) / (c**2))
+                        train_x.append(x_train)
+                        train_y.append(y_train)
+                        train_z.append(z_train)
+                
+                train_x = np.array(train_x, dtype=self.dtype)
+                train_y = np.array(train_y, dtype=self.dtype)
+                train_z = np.array(train_z, dtype=self.dtype)
+                
+                # Create thin plate spline RBF
+                rbf = interp.Rbf(train_x, train_y, train_z, function='thin_plate', epsilon=self.pitch[ndm])
+                
+                # Evaluate on grid
+                influence = rbf(eval_points_x, eval_points_y, grid=False).astype(self.dtype)
+                influence[influence < 0] = 0  # Clip negative values
+                
+                m_modes[:, kIF_idx] = influence
+        
+        else:
+            # Original separable approach for gaussian and xinetics
+            # defining the spline functions
+            c  = 1/np.sqrt(np.log(1/self.mechCoupling[ndm]))
+            df = 1e-10
+            mx = np.sqrt(-np.log(df)*c**2)
+            r  = np.linspace(-mx,mx,1001)
 
-        for kIF in np.arange(0,self.nValidActuator[ndm]):
-            buffer = np.transpose([wv[:,kIF]])*wu[:,kIF]
-            m_modes[:,kIF] = buffer.ravel() #buffer.A.ravel()
+            if self.modes == 'gaussian':
+                f  = np.exp(-r**2/c**2)
+            elif self.modes == 'xinetics':
+                # defining main parameters
+                m = 0.180267421;
+                p = np.array([2.24506, 6.28464*m**2,-18.1956*m**4,31.2025*m**6,76.9336,-39.7956,m])
+                tmp     = -150*p[6]**8 * r** 8
+                w       = np.argwhere(r**8 < 1/(3*p[6]**8))
+                mask    = 0*tmp
+                mask[w] = np.exp(tmp[w])
+                # Define sub function
+                e  = (p[0] + p[1]*r**2 + p[2]*r**4 + p[3]*r**6)*mask
+                re = (abs(r)**e) * p[6]**e
+                # Get the influence function model
+                f  = np.exp(-p[4]*re)*(1 + p[5]*re)*mask
+
+            spline = interp.BSpline(r*self.pitch[ndm], f,3)
+
+            u           = np.transpose([u0])- [xIF]
+            wu          = np.zeros((resolution,nIF), dtype=self.dtype)
+            index_u     = (u >= -r[len(r)-1]*self.pitch[ndm]) & (u <= r[len(r)-1]*self.pitch[ndm])
+            wu[index_u] = spline(u[index_u])
+
+            v           = np.transpose([u0])- [yIF]
+            wv          = np.zeros((resolution,nIF), dtype=self.dtype)
+            index_v     = (v >= -r[len(r)-1]*self.pitch[ndm]) & (v <= r[len(r)-1]*self.pitch[ndm])
+            wv[index_v] = spline(v[index_v])
+
+            wv = wv[:,iIF[kIF]]
+            wu = wu[:,jIF[kIF]]
+
+            for kIF_idx in np.arange(0,self.nValidActuator[ndm]):
+                buffer = np.transpose([wv[:,kIF_idx]])*wu[:,kIF_idx]
+                m_modes[:,kIF_idx] = buffer.ravel() #buffer.A.ravel()
 
         return m_modes
 
