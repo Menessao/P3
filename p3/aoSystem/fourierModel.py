@@ -63,7 +63,7 @@ class fourierModel:
                  getEnsquaredEnergy=False, getEncircledEnergy=False, fftphasor=False,
                  MV=0, nyquistSampling=False, addOtfPixel=False, freq=None, ao=None,
                  computeFocalAnisoCov=True, TiltFilter=False, doComputations=True,
-                 psdExpansion=False, reduce_memory=False):
+                 psdExpansion=False, reduce_memory=False, compute_og:bool=False):
 
         tstart = time.time()
 
@@ -87,6 +87,7 @@ class fourierModel:
         self.getEnsquaredEnergy = getEnsquaredEnergy
         self.getEncircledEnergy = getEncircledEnergy
         self.reduce_memory = reduce_memory
+        self.compute_og = compute_og
 
         if freq is not None:
             self.freq = freq
@@ -782,10 +783,11 @@ class fourierModel:
             # CLOSED-LOOP
             psd = np.zeros((self.freq.nOtf,self.freq.nOtf,self.ao.src.nSrc),
                            dtype=self.dtype)
-
+            
             # AO correction area
             id1 = np.ceil(self.freq.nOtf/2 - self.freq.resAO/2).astype(int)
             id2 = np.ceil(self.freq.nOtf/2 + self.freq.resAO/2).astype(int)
+
             # Noise
             self.psdNoise = np.real(self.noisePSD())
             if self.nGs == 1:
@@ -882,6 +884,63 @@ class fourierModel:
                 tiltFilter = self.TiltFilter()
                 for i in range(self.ao.src.nSrc):
                     psd[:,:,i] *= tiltFilter
+
+
+############################################## OGs ###################################################  
+            if self.compute_og:
+                pupil_mask = self.ao.tel.pupil
+                pad_width = (self.freq.nOtf - pupil_mask.shape[0]) // 2
+                if pad_width > 0:
+                    pupil_mask = nnp.pad(pupil_mask, pad_width, mode='constant')
+
+                # Generate the Convolutional Model components
+                pyramid_mask = self.generate_pyramid_mask()
+                modal_basis = self.generate_fourier_basis()
+                
+                # Fetch Modulation radius in lambda/D pixels
+                # P3 stores modulation in lambda/D, which we scale by the pupil size in the padded array
+                rMod = self.ao.wfs.optics[0].modulation 
+                mod_radius_pixels = rMod * (self.freq.nOtf / self.freq.resAO)
+
+                current_og = 1.0
+                max_iters = 10
+                tol = 1e-3
+
+                static_psd = psd.copy()
+                base_psd_noise = self.psdNoise.copy()
+                base_psd_alias = self.psdAlias.copy()
+
+                for iteration in range(max_iters):
+                    print(iteration)
+                    # Scale base terms
+                    scaled_noise = base_psd_noise / current_og**2
+                    scaled_alias = base_psd_alias / current_og**2
+                    
+                    # Reconstruct total PSD
+                    psd = static_psd.copy()
+                    psd[id1:id2,id1:id2,:] += scaled_noise + scaled_alias
+                    
+                    # Estimate new OG using the PSD-based Fauvarque Convolutional Model
+                    # (Assuming evaluating for the first source [:,:,0])
+                    current_psd_slice = psd[:,:,0] 
+                    new_og = self.compute_optical_gains(
+                        current_psd_slice, 
+                        pupil_mask, 
+                        pyramid_mask, 
+                        modal_basis, 
+                        mod_radius_pixels
+                    )
+                    
+                    # Convergence check
+                    if abs(new_og - current_og) < tol:
+                        break
+                    current_og = new_og
+
+                # Save final scaled tracking terms for errorBreakDown
+                self.psdNoise = scaled_noise[:, :, 0] if self.nGs == 1 else scaled_noise
+                self.psdAlias = scaled_alias[:, :, 0] 
+                self.ogs = current_og
+###################################### OGs end ###################################################     
 
             # Extra error
             if self.verbose:
@@ -1055,136 +1114,6 @@ class fourierModel:
 
         self.t_aliasingPSD = 1000 * (time.time() - tstart)
         return self.freq.mskInAO_ * psd * self.ao.atm.r0**(-5/3) * 0.0229
-
-
-    # def aliasingPSD(self):
-    #     """
-    #     Aliasing error power spectrum density
-    #     Memory-optimized with GPU-aware vectorized implementation
-    #     Adapted for Modulated Pyramid WFS
-    #     """
-    #     tstart = time.time()
-    #     psd = np.zeros((self.freq.resAO, self.freq.resAO), dtype=self.dtype)
-    #     i = self.complex_dtype(1j)
-    #     d = self.ao.wfs.optics[0].dsub
-    #     clock_rate = np.array([self.ao.wfs.detector[j].clock_rate for j in range(self.nGs)])
-    #     T = np.mean(clock_rate / self.ao.rtc.holoop['rate'])
-    #     td = T * self.ao.rtc.holoop['delay']
-    #     vx = self.ao.atm.wSpeed * nnp.cos(self.ao.atm.wDir * np.pi / 180)
-    #     vy = self.ao.atm.wSpeed * nnp.sin(self.ao.atm.wDir * np.pi / 180)
-    #     weights = self.ao.atm.weights
-
-    #     if not hasattr(self, 'Rx'):
-    #         self.reconstructionFilter()
-            
-    #     if self.ao.rtc.holoop['gain'] == 0:
-    #         tf = 1
-    #     else:
-    #         tf = self.h1
-
-    #     # Create grid of frequency shifts
-    #     mi, ni = np.meshgrid(
-    #         np.arange(-self.freq.nTimes, self.freq.nTimes),
-    #         np.arange(-self.freq.nTimes, self.freq.nTimes),
-    #         indexing="ij"
-    #     )
-    #     mask = (mi != 0) | (ni != 0)
-    #     mi = mi[:, :, None]
-    #     ni = ni[:, :, None]
-
-    #     kxAO = self.freq.kxAO_.ravel()
-    #     kyAO = self.freq.kyAO_.ravel()
-
-    #     km = kxAO[None, None, :] - mi / d
-    #     kn = kyAO[None, None, :] - ni / d
-
-    #     NN = self.Rx.shape
-
-    #     PR = FourierUtils.pistonFilter(
-    #         self.ao.tel.D,
-    #         np.hypot(km, kn),
-    #         fm=mi[:, :, None] / d,
-    #         fn=ni[:, :, None] / d,
-    #         dtype=self.dtype
-    #     )
-
-    #     W_mn = (km**2 + kn**2 + 1 / self.ao.atm.L0**2) ** (-11 / 6)
-
-    #     # Define modulation radius in spatial frequency (1/m). 
-    #     rMod = self.ao.wfs.optics[0].modulation
-    #     if rMod is None:
-    #         rMod = 0
-    #     alpha = rMod / self.ao.tel.D
-        
-    #     # Unmodulated PWFS fallback: if alpha is 0, use np.sign
-    #     if alpha == 0:
-    #         Hx_alias = i * np.sign(km)
-    #         Hy_alias = i * np.sign(kn)
-    #     else:
-    #         # Modulated PWFS: Fourier-domain saturated approximation
-    #         Hx_alias = (2 * i / np.pi) * np.arcsin(np.clip(km / alpha, -1.0, 1.0))
-    #         Hy_alias = (2 * i / np.pi) * np.arcsin(np.clip(kn / alpha, -1.0, 1.0))
-
-    #     # Reconstructor (reshape for broadcasting)
-    #     Rx_flat = self.Rx.ravel()[None, None, :]
-    #     Ry_flat = self.Ry.ravel()[None, None, :]
-        
-    #     # Calculate Q using the PWFS transfer function, while keeping the 
-    #     # detector integration sinc terms valid for the physical CCD pixels.
-    #     Q = (Rx_flat * Hx_alias + Ry_flat * Hy_alias) * (np.sinc(d * km) * np.sinc(d * kn))
-    #     # ---------------------------------------------------------
-
-    #     tf_flat = np.asarray(tf.ravel()[None, None, :])
-
-    #     # **VECTORIZED CHUNKED PROCESSING**:
-    #     # Process layers in chunks with full vectorization
-    #     chunk_size = min(5, self.ao.atm.nL)  # Adjust chunk size
-    #     avr_sum = np.zeros((mi.shape[0], mi.shape[1], len(kxAO)),
-    #                        dtype=self.complex_dtype)
-
-    #     # Pre-allocate chunk array ONCE (fixed size, reused across iterations)
-    #     avr_chunk = np.zeros((chunk_size, mi.shape[0], mi.shape[1], len(kxAO)),
-    #                          dtype=self.complex_dtype)
-
-    #     for chunk_start in range(0, self.ao.atm.nL, chunk_size):
-    #         chunk_end = min(chunk_start + chunk_size, self.ao.atm.nL)
-    #         n_layers_chunk = chunk_end - chunk_start
-
-    #         # Reset chunk array to zero (reusing allocation)
-    #         avr_chunk.fill(0)
-
-    #         # **VECTORIZED COMPUTATION FOR ALL LAYERS IN CHUNK**
-    #         # Extract velocity components for this chunk
-    #         vx_chunk = vx[chunk_start:chunk_end]  # Shape: (n_layers_chunk,)
-    #         vy_chunk = vy[chunk_start:chunk_end]
-
-    #         # Broadcast to (n_layers_chunk, 1, 1, 1) for proper broadcasting
-    #         vx_bc = np.asarray(vx_chunk[:, None, None, None])
-    #         vy_bc = np.asarray(vy_chunk[:, None, None, None])
-
-    #         # Compute transfer function for all layers in chunk simultaneously
-    #         # Broadcasting: (n_layers_chunk, nShifts, nShifts, K)
-    #         avr_chunk[:n_layers_chunk] = (
-    #             np.sinc(km[None, :, :, :] * vx_bc * T) *
-    #             np.sinc(kn[None, :, :, :] * vy_bc * T) *
-    #             np.exp(2j * np.pi * (km[None, :, :, :] * vx_bc + kn[None, :, :, :] * vy_bc) * td) *
-    #             tf_flat[None, :, :, :]
-    #         )
-
-    #         # Weighted sum over ONLY the valid layers in this chunk
-    #         # For the last chunk, only sum over the first n_layers_chunk elements
-    #         weights_chunk = np.asarray(weights[chunk_start:chunk_end][:, None, None, None])
-    #         avr_sum += np.sum(weights_chunk * avr_chunk[:n_layers_chunk], axis=0)
-
-    #     # Free chunk memory
-    #     avr_chunk = None
-
-    #     # Compute aliasing PSD
-    #     psd = np.sum(PR * W_mn * np.abs(Q * avr_sum) ** 2 * mask[:, :, None], axis=(0, 1))
-    #     psd = np.reshape(psd, NN)
-
-    #     self.t_aliasingPSD = 1000 * (time.time() - tstart)
-    #     return self.freq.mskInAO_ * psd * self.ao.atm.r0**(-5/3) * 0.0229
 
     def noisePSD(self):
         """Noise error power spectrum density
@@ -1941,6 +1870,164 @@ class fourierModel:
                     )
 
         self.t_getPsfMetrics = 1000*(time.time() - tstart)
+
+################################################ OGs #####################################################
+
+    def compute_optical_gains(self, current_psd, pupil_mask, pyramid_mask, modal_basis, mod_radius_pixels):
+        """
+        Computes pyWFS optical gains directly from the estimated residual PSD 
+        using the generalized Fauvarque Convolutional Model.
+        """
+        ny, nx = current_psd.shape
+        
+        # 1. Phase Structure Function (D_phi) and Turbulence OTF
+        # Using nnp (NumPy/CuPy compatible) and P3's imported fft
+        psd_u = nnp.fft.ifftshift(current_psd)
+        B_phi = nnp.real(nnp.fft.fftshift(nnp.fft.ifft2(psd_u)))
+        D_phi = 2 * (B_phi.max() - B_phi)
+        otf_turb = nnp.exp(-0.5 * D_phi)
+        
+        # 2. Diffraction-Limited Pupil OTF
+        pupil_u = nnp.fft.ifftshift(pupil_mask)
+        psf_dl = nnp.abs(nnp.fft.fftshift(nnp.fft.fft2(pupil_u)))**2
+        psf_dl /= nnp.sum(psf_dl)
+        otf_dl = nnp.fft.fftshift(nnp.fft.ifft2(nnp.fft.ifftshift(psf_dl)))
+        
+        # 3. Modulation Transfer Function (MTF)
+        ky, kx = nnp.mgrid[-ny//2 : ny//2, -nx//2 : nx//2]
+        kr = nnp.sqrt(kx**2 + ky**2)
+        # Using spc.j0 as imported in fourierModel.py
+        mtf_mod = spc.j0(2 * nnp.pi * mod_radius_pixels * kr / nx)
+        
+        # 4. Modulated Long-Exposure PSFs (Omega)
+        otf_res = otf_dl * otf_turb * mtf_mod
+        psf_mod_res = nnp.real(nnp.fft.fftshift(nnp.fft.fft2(nnp.fft.ifftshift(otf_res))))
+        psf_mod_res = nnp.maximum(psf_mod_res, 0)
+        psf_mod_res /= nnp.sum(psf_mod_res)
+        
+        otf_ref = otf_dl * mtf_mod
+        psf_mod_ref = nnp.real(nnp.fft.fftshift(nnp.fft.fft2(nnp.fft.ifftshift(otf_ref))))
+        psf_mod_ref = nnp.maximum(psf_mod_ref, 0)
+        psf_mod_ref /= nnp.sum(psf_mod_ref)
+
+        # 5. Extract Impulse Responses
+        def get_impulse_response(omega, mask):
+            omega_u = nnp.fft.ifftshift(omega)
+            mask_u = nnp.fft.ifftshift(mask)
+            term1 = nnp.fft.fft2(mask_u)
+            term2 = nnp.fft.fft2(mask_u * omega_u)
+            ir_u = 2 * nnp.imag(nnp.fft.ifft2(nnp.conj(term1) * term2))
+            return nnp.fft.fftshift(ir_u)
+
+        ir_res = get_impulse_response(psf_mod_res, pyramid_mask)
+        ir_ref = get_impulse_response(psf_mod_ref, pyramid_mask)
+
+        # 6. Compute Modal Optical Gains
+        num_modes = modal_basis.shape[0]
+        optical_gains = nnp.zeros(num_modes)
+
+        f_ir_res = nnp.fft.fft2(nnp.fft.ifftshift(ir_res))
+        f_ir_ref = nnp.fft.fft2(nnp.fft.ifftshift(ir_ref))
+
+        for i in range(num_modes):
+            zi_u = nnp.fft.ifftshift(modal_basis[i])
+            f_zi = nnp.fft.fft2(zi_u)
+            
+            sig_res = nnp.real(nnp.fft.fftshift(nnp.fft.ifft2(f_ir_res * f_zi)))
+            sig_ref = nnp.real(nnp.fft.fftshift(nnp.fft.ifft2(f_ir_ref * f_zi)))
+            
+            numerator = nnp.sum(sig_res * sig_ref)
+            denominator = nnp.sum(sig_ref * sig_ref)
+            optical_gains[i] = numerator / denominator
+
+        # Return a global scalar gain (average across modes) to rescale P3's PSD terms
+        # Alternatively, return the full array if handling mode-by-mode noise scaling
+        global_og = nnp.mean(optical_gains)
+        return max(global_og, 0.01)
+
+    def generate_pyramid_mask(self):
+        """
+        Generates the complex transmission mask of a 4-sided pyramid.
+        Dimensions match the P3 padded OTF grid (nOtf x nOtf).
+        """
+        nOtf = self.freq.nOtf
+        resAO = self.freq.resAO
+        
+        # 1. Create focal plane coordinates
+        # Grid goes from -nOtf//2 to nOtf//2 - 1
+        u, v = nnp.mgrid[-nOtf//2 : nOtf//2, -nOtf//2 : nOtf//2]
+        
+        # 2. Compute Pyramid Tilt Factor
+        # The tilt must separate the 4 pupils. A spatial shift of `resAO` pixels
+        # in the pupil plane requires a phase slope of 2*pi*(resAO/nOtf) in the focal plane.
+        # We multiply by an extra factor (e.g., 1.5 or 2.0) to ensure pupils do not overlap.
+        separation_factor = 1.5 
+        tilt_factor = 2 * nnp.pi * (resAO * separation_factor) / nOtf
+        
+        # 3. Calculate Pyramid Phase
+        # The standard ideal pyramid introduces a phase proportional to (|u| + |v|)
+        pyramid_phase = tilt_factor * (nnp.abs(u) + nnp.abs(v))
+        
+        # 4. Convert to complex transmission mask
+        pyramid_mask = nnp.exp(1j * pyramid_phase)
+        
+        return pyramid_mask
+
+    def generate_fourier_basis(self, max_cycles=None):
+        """
+        Generates a Fourier modal basis (sine and cosine phase screens) 
+        up to the AO cutoff frequency. 
+        Dimensions: (N_modes, nOtf, nOtf)
+        """
+        nOtf = self.freq.nOtf
+        resAO = self.freq.resAO
+        
+        # 1. Create pupil plane coordinates
+        y, x = nnp.mgrid[-nOtf//2 : nOtf//2, -nOtf//2 : nOtf//2]
+        
+        # 2. Determine Maximum Spatial Frequency
+        # If not manually provided, default to the AO Nyquist frequency 
+        # (half the number of actuators across the pupil).
+        if max_cycles is None:
+            if hasattr(self.ao, 'dms') and hasattr(self.ao.dms, 'nActuators'):
+                max_cycles = int(self.ao.dms.nActuators[0] // 2)
+            else:
+                max_cycles = int(resAO // 4) # Safe fallback
+                
+        modes = []
+        
+        # 3. Populate Sine and Cosine modes within the circular DM cutoff
+        for ky in range(-max_cycles, max_cycles + 1):
+            for kx in range(-max_cycles, max_cycles + 1):
+                
+                # Enforce a circular frequency cutoff
+                if kx**2 + ky**2 <= max_cycles**2:
+                    
+                    # Scale frequencies to the pupil diameter (resAO)
+                    kx_norm = 2 * nnp.pi * kx / resAO
+                    ky_norm = 2 * nnp.pi * ky / resAO
+                    phase = kx_norm * x + ky_norm * y
+                    
+                    # Add unique real modes (Piston, Cosine, Sine)
+                    if kx == 0 and ky == 0:
+                        modes.append(nnp.ones((nOtf, nOtf))) # Piston
+                    elif ky > 0 or (ky == 0 and kx > 0):
+                        # Normalizing by standard deviation is optional but recommended
+                        cos_mode = nnp.cos(phase)
+                        sin_mode = nnp.sin(phase)
+                        modes.append(cos_mode)
+                        modes.append(sin_mode)
+                        
+        # Stack into a 3D array (N_modes, ny, nx)
+        modal_basis = nnp.array(modes)
+        
+        # Move to GPU if nnp is mapped to CuPy in P3
+        if hasattr(nnp, 'asnumpy') and not isinstance(modal_basis, nnp.ndarray):
+            modal_basis = nnp.asarray(modal_basis)
+            
+        return modal_basis
+
+############################################# end OGs ###################################################
 
     def estimate_memory_usage(self, include_peak=True):
         """
