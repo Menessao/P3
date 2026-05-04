@@ -909,6 +909,9 @@ class fourierModel:
                 static_psd = psd.copy()
                 base_psd_noise = self.psdNoise.copy()
                 base_psd_alias = self.psdAlias.copy()
+                psd = None
+                self.psdNoise = None
+                self.psdAlias = None
 
                 for iteration in range(max_iters):
                     print(iteration)
@@ -918,10 +921,9 @@ class fourierModel:
                     
                     # Reconstruct total PSD
                     psd = static_psd.copy()
-                    psd[id1:id2,id1:id2,:] += scaled_noise + scaled_alias
+                    psd[id1:id2,id1:id2,0] += scaled_noise + scaled_alias
                     
                     # Estimate new OG using the PSD-based Fauvarque Convolutional Model
-                    # (Assuming evaluating for the first source [:,:,0])
                     current_psd_slice = psd[:,:,0] 
                     new_og = self.compute_optical_gains(
                         current_psd_slice, 
@@ -937,9 +939,9 @@ class fourierModel:
                     current_og = new_og
 
                 # Save final scaled tracking terms for errorBreakDown
-                self.psdNoise = scaled_noise[:, :, 0] if self.nGs == 1 else scaled_noise
-                self.psdAlias = scaled_alias[:, :, 0] 
-                self.ogs = current_og
+                self.psdNoise = scaled_noise
+                self.psdAlias = scaled_alias
+                self.ogs = current_og.copy()
 ###################################### OGs end ###################################################     
 
             # Extra error
