@@ -2113,60 +2113,6 @@ class fourierModel:
         
         return pyramid_mask
 
-    def generate_fourier_basis(self, max_cycles=None):
-        """
-        Generates a Fourier modal basis (sine and cosine phase screens) 
-        up to the AO cutoff frequency. 
-        Dimensions: (N_modes, nOtf, nOtf)
-        """
-        nOtf = self.freq.nOtf
-        resAO = self.freq.resAO
-        
-        # 1. Create pupil plane coordinates
-        y, x = nnp.mgrid[-nOtf//2 : nOtf//2, -nOtf//2 : nOtf//2]
-        
-        # 2. Determine Maximum Spatial Frequency
-        # If not manually provided, default to the AO Nyquist frequency 
-        # (half the number of actuators across the pupil).
-        if max_cycles is None:
-            if hasattr(self.ao, 'dms') and hasattr(self.ao.dms, 'nActuators'):
-                max_cycles = int(self.ao.dms.nActuators[0] // 2)
-            else:
-                max_cycles = int(resAO // 4) # Safe fallback
-                
-        modes = []
-        
-        # 3. Populate Sine and Cosine modes within the circular DM cutoff
-        for ky in range(-max_cycles, max_cycles + 1):
-            for kx in range(-max_cycles, max_cycles + 1):
-                
-                # Enforce a circular frequency cutoff
-                if kx**2 + ky**2 <= max_cycles**2:
-                    
-                    # Scale frequencies to the pupil diameter (resAO)
-                    kx_norm = 2 * nnp.pi * kx / resAO
-                    ky_norm = 2 * nnp.pi * ky / resAO
-                    phase = kx_norm * x + ky_norm * y
-                    
-                    # Add unique real modes (Piston, Cosine, Sine)
-                    if kx == 0 and ky == 0:
-                        modes.append(nnp.ones((nOtf, nOtf))) # Piston
-                    elif ky > 0 or (ky == 0 and kx > 0):
-                        # Normalizing by standard deviation is optional but recommended
-                        cos_mode = nnp.cos(phase)
-                        sin_mode = nnp.sin(phase)
-                        modes.append(cos_mode)
-                        modes.append(sin_mode)
-                        
-        # Stack into a 3D array (N_modes, ny, nx)
-        modal_basis = nnp.array(modes)
-        
-        # Move to GPU if nnp is mapped to CuPy in P3
-        if hasattr(nnp, 'asnumpy') and not isinstance(modal_basis, nnp.ndarray):
-            modal_basis = nnp.asarray(modal_basis)
-            
-        return modal_basis
-
 ############################################# end OGs ###################################################
 
     def estimate_memory_usage(self, include_peak=True):
