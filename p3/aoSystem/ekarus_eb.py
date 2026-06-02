@@ -12,10 +12,10 @@ gaintol = 2e-2
 savedir = f'/raid1/mmenessini/results/{fname}/eb_csv'
 
 min_gain = 0.1
-max_gain = 1.9
+max_gain = 1.0
 taus = np.array([0.5,1.5,1.0,0.75])*1e-3
 seeings = np.array([1.0, 1.5, 2.0, 2.5, 3.0])
-mags = np.arange(11)
+mags = np.arange(13)
 freqs = np.arange(50, 1050, step=50)
 
 binVals = np.arange(4,dtype=int)
@@ -127,7 +127,7 @@ def update_pars_file(delay=None, gain=None, mag=None, seeing=None, fs=None, Nsub
         config.set('DM', 'DmPitchs', f'[{pitch}]')
 
     if RON is not None:
-        config.set('sensor_HO', 'sigmaRON', f'[{RON}]')
+        config.set('sensor_HO', 'SigmaRON', f'{RON}')
 
     # Write back (overwrite) the INI file
     with open(ini_path, 'w') as fh:
@@ -199,6 +199,8 @@ def populate_vectors_from_df(df, arrays):
 def optimize_gain_for_frequency(idCenter, freq, mag, seeing, tau):
     update_pars_file(mag=mag, seeing=seeing, rMod=rMod, delay=1+tau*freq, fs=freq)
     a, b = min_gain, max_gain
+    if tau*freq >= 2:
+        b = 0.67
     while (b - a) > gaintol:
         m1 = a + (b - a) / 3
         m2 = b - (b - a) / 3
