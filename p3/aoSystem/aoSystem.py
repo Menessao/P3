@@ -7,6 +7,8 @@ Created on Mon Apr  5 14:42:49 2021
 """
 
 # IMPORTING PYTHON LIBRAIRIES
+import copy
+import warnings
 import os.path as ospath
 import pathlib
 from configparser import ConfigParser
@@ -21,6 +23,7 @@ from p3.aoSystem.source import source
 from p3.aoSystem.deformableMirror import deformableMirror
 from p3.aoSystem.detector import detector
 from p3.aoSystem.sensor import sensor
+from p3.aoSystem.processing import is_auto_noise_var
 from p3.aoSystem.rtc import rtc
 import p3.aoSystem.anisoplanatismModel as anisoplanatismModel
 
@@ -105,48 +108,86 @@ class aoSystem():
         )
 
     def resolve_path(self, path_value):
-        """Use enhanced path resolution with TIPTOP support"""
-        from p3.aoSystem import resolve_config_path, PATH_TIPTOP, detect_tiptop_path
-
+        from p3.aoSystem import resolve_config_path
         path_p3 = str(pathlib.Path(__file__).parent.parent.absolute())
-        # lazily re-try TIPTOP detection if it was None at import time
-        path_tiptop = PATH_TIPTOP or detect_tiptop_path()
-
-        return resolve_config_path(path_value, self.path_root, path_p3, path_tiptop)
+        return resolve_config_path(path_value, self.path_root, path_p3)
 
 
     def __init__(self, path_config, path_root='',
                  getPSDatNGSpositions=False,
                  psdExpansion=False,
-                 coo_stars=None, verbose=True):
+                 psdPerWavelength=False,
+                 coo_stars=None, verbose=True,
+                 config_dict=None):
+        """
+        Parameters
+        ----------
+        path_config : str
+            Path to the .ini or .yml parameter file (ignored if
+            ``config_dict`` is given).
+        path_root : str, optional
+            Root directory prepended to relative paths of auxiliary files
+            (pupil, static maps, ...) referenced in the parameter file.
+        getPSDatNGSpositions : bool, optional
+            Append the ``[sources_LO]`` directions to the science directions.
+        psdExpansion : bool, optional
+            Let frequencyDomain choose the PSD step from the wavelength with
+            the finest required step and a non-integer oversampling, so that
+            the science pixel scale is reproduced exactly.
+        psdPerWavelength : bool, optional
+            With more than one science wavelength, build one exact frequency
+            grid per wavelength (see fourierModel).
+        coo_stars : array_like, optional
+            Cartesian coordinates ``[y, x]`` (arcsec, shape (2, nSrc)) of the
+            science sources; if given they replace
+            ``[sources_science] Zenith/Azimuth``.
+        verbose : bool, optional
+            Print diagnostic messages.
+        config_dict : dict, optional
+            Parameter dictionary (same structure as the parameter file) used
+            instead of reading ``path_config``.
+        """
 
         if path_root is None:
             path_root = ''
         self.path_root = path_root
 
-
         self.coo_stars = coo_stars
         self.psdExpansion = psdExpansion
+        # Independent from psdExpansion (which only picks the exact PSDstep/
+        # kRef_float for the *shared* grid): when True and more than one
+        # science wavelength is requested, frequencyDomain builds one exact
+        # grid per wavelength (self.wvl_grids) and fourierModel.PSD becomes a
+        # list, one array per wavelength, instead of a single shared array.
+        # Defaults to False so existing psdExpansion=True callers (e.g.
+        # TIPTOP, which always sets psdExpansion=True) keep today's shared
+        # single-array behaviour unless they explicitly opt in.
+        self.psdPerWavelength = psdPerWavelength
         self.error = False
-        # verify if the file exists
-        if not ospath.isfile(path_config):
-            raise ValueError('The parameter file (.ini or .yml) could not be found.'\
-                             + str(path_config))
 
-        if path_config[-4:]=='.ini':
-            # open the .ini file
-            config = ConfigParser()
-            config.optionxform = str
-            config.read(path_config)
-            self.my_data_map = {}
-            for section in config.sections():
-                self.my_data_map[section] = {}
-                for name,value in config.items(section):
-                    self.my_data_map[section].update({name:self._parse_config_value(value)})
-        elif path_config[-4:]=='.yml':
-            with open(path_config) as f:
-                my_yaml_dict = yaml.safe_load(f)
-            self.my_data_map = my_yaml_dict
+        if config_dict is not None:
+            # Use the caller-supplied dict (deep-copied so P3 internals stay isolated).
+            self.my_data_map = copy.deepcopy(config_dict)
+        else:
+            # verify if the file exists
+            if not ospath.isfile(path_config):
+                raise ValueError('The parameter file (.ini or .yml) could not be found.'\
+                                 + str(path_config))
+
+            if path_config[-4:]=='.ini':
+                # open the .ini file
+                config = ConfigParser()
+                config.optionxform = str
+                config.read(path_config)
+                self.my_data_map = {}
+                for section in config.sections():
+                    self.my_data_map[section] = {}
+                    for name,value in config.items(section):
+                        self.my_data_map[section].update({name:self._parse_config_value(value)})
+            elif path_config[-4:]=='.yml':
+                with open(path_config) as f:
+                    my_yaml_dict = yaml.safe_load(f)
+                self.my_data_map = my_yaml_dict
 
         # Precision parameter: look for 'precision' in [COMPUTATION] section
         # Default to 'double' if not specified, and set dtype and complex_dtype accordingly
@@ -343,7 +384,10 @@ class aoSystem():
             wvlAtm = 500e-9
 
         if self.check_config_key('atmosphere','Seeing'):
-            r0 = 0.976*wvlAtm/self.get_config_value('atmosphere','Seeing')*3600*180/np.pi
+            seeing = self.get_config_value('atmosphere','Seeing')
+            if not (np.isfinite(seeing) and seeing > 0):
+                raise ValueError(f"'Seeing' in section 'atmosphere' must be > 0, got {seeing}")
+            r0 = 0.976*wvlAtm/seeing*3600*180/np.pi
         else:
             if self.check_config_key('atmosphere','r0_value'):
                 r0 = self.get_config_value('atmosphere','r0_value')
@@ -382,6 +426,8 @@ class aoSystem():
         if not len(weights) == len(heights) == len(wSpeed) == len(wDir):
             self.raiseNotSameLength('atmosphere',
                                     ['Cn2Weights','Cn2Heights','WindSpeed','WindDirection'])
+        weights, heights, wSpeed, wDir, L0 = self._validate_atmosphere(
+            wvlAtm, r0, L0, weights, heights, wSpeed, wDir)
 
         #----- class definition
         self.atm = atmosphere(wvlAtm, r0*airmass**(-3.0/5.0),
@@ -459,7 +505,8 @@ class aoSystem():
 
         if np.any(self.coo_stars):
             zenithSrc = np.hypot(self.coo_stars[0],self.coo_stars[1])
-            azimuthSrc = np.arctan2(self.coo_stars[0],self.coo_stars[1])
+            # source expects the azimuth in degrees
+            azimuthSrc = np.degrees(np.arctan2(self.coo_stars[0],self.coo_stars[1]))
 
         #----- verification
         if len(zenithSrc) != len(azimuthSrc):
@@ -756,8 +803,6 @@ class aoSystem():
             self.raiseMissingRequiredOpt('sensor_science', 'PixelScale')
 
         fov = self.get_science_field_of_view(wvlSrc, psInMas, DmPitchs)
-        if self.psdExpansion and len(wvlSrc) > 1:
-            fov = int(fov * np.ceil(np.max(wvlSrc) / np.min(wvlSrc)))
         self.my_data_map['sensor_science']['FieldOfView'] = fov
 
         if self.check_config_key('sensor_science','Binning'):
@@ -994,6 +1039,47 @@ class aoSystem():
 
         return s
 
+    @staticmethod
+    def _validate_atmosphere(wvl, r0, L0, weights, heights, wSpeed, wDir):
+        """Check the physical validity of the [atmosphere] parameters.
+
+        Invalid values used to propagate silently as inf/NaN or as wrong but
+        plausible results. Layers with zero Cn2 weight carry no turbulence and
+        are removed (with a warning), since they give an infinite layer r0.
+        """
+        def as_array(name, v):
+            a = np.atleast_1d(np.asarray(v, dtype=float))
+            if not np.all(np.isfinite(a)):
+                raise ValueError(f"'{name}' in section 'atmosphere' must be finite, got {list(a)}")
+            return a
+
+        def check(name, a, cond, text):
+            if not np.all(cond):
+                raise ValueError(f"'{name}' in section 'atmosphere' {text}, got {list(a)}")
+
+        wvl_a = as_array('Wavelength', wvl)
+        check('Wavelength', wvl_a, wvl_a > 0, 'must be > 0')
+        r0_a = as_array('Seeing/r0_value', r0)
+        check('Seeing/r0_value', r0_a, r0_a > 0, 'must give r0 > 0 (Seeing > 0)')
+        L0_a = as_array('L0', L0)
+        check('L0', L0_a, L0_a > 0, 'must be > 0')
+        w = as_array('Cn2Weights', weights)
+        check('Cn2Weights', w, w >= 0, 'must be >= 0')
+        h = as_array('Cn2Heights', heights)
+        check('Cn2Heights', h, h >= 0, 'must be >= 0 (altitude above the telescope)')
+        v = as_array('WindSpeed', wSpeed)
+        check('WindSpeed', v, v >= 0, 'must be >= 0 (use WindDirection + 180 to reverse the wind)')
+        d = as_array('WindDirection', wDir)
+
+        keep = w > 0
+        if not keep.all():
+            warnings.warn(f"{int((~keep).sum())} layer(s) with Cn2Weights = 0 removed "
+                          f"(heights {list(h[~keep])} m).", stacklevel=3)
+            if np.size(L0_a) == len(w):
+                L0 = list(L0_a[keep])
+            w, h, v, d = w[keep], h[keep], v[keep], d[keep]
+        return list(w), list(h), list(v), list(d), L0
+
     def errorBreakdown(self):
         """
             Computing the AO wavefront error breakdown based on theoretical formula
@@ -1026,7 +1112,7 @@ class aoSystem():
                         * Dr053 * np.sum((nrad+1)**(-2/3)))
 
         # Noise errors
-        if self.wfs.processing.noiseVar == [None]:
+        if is_auto_noise_var(self.wfs.processing.noiseVar):
             varNoise = self.wfs.NoiseVariance(self.atm.r0 ,self.atm.wvl)
         else:
             varNoise = self.wfs.processing.noiseVar
@@ -1038,7 +1124,7 @@ class aoSystem():
                 rad2nm(0.04 * (self.atm.meanWind/self.tel.D/self.rtc.ttloop['bandwidth'])\
                             * Dr053 * 2**(-2/3))
 
-            if self.tts.processing.noiseVar == [None]:
+            if is_auto_noise_var(self.tts.processing.noiseVar):
                 #varNoise = self.tts.NoiseVariance(self.atm.r0 ,self.atm.wvl)
                 # the previuos line has been commented because it makes no sense
                 # to consider the open loop r0 in this computation:
