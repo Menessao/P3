@@ -15,16 +15,18 @@ savedir = f'/raid1/mmenessini/results/{fname}/eb_csv'
 min_gain = 0.1
 max_gain = 1.0
 seeings = np.array([1.0, 1.25, 1.5, 1.75, 2.0])
-mags = np.arange(14)
+mags = np.arange(3,14)
 
 nModes = np.array([350])
-maxFreqs = np.array([500, 700, 900])
+maxFreqs = np.array([500, 700, 900, 1100, 1400])
 windSpeeds = np.array([3, 5, 7])
 taus = np.array([1.1e-3, 0.8e-3])
 
 binVals = np.arange(2)
 nSubapsBin = np.array([38, 19])
 nModesBin = np.array([350, 275])
+
+optimize_nmodes = False
 
 # --- AO System Initialization ---
 fao = fourierModel(
@@ -181,30 +183,23 @@ def optimize_gain_and_nmodes_for_frequency(idCenter, freq, mag, seeing, tau, max
     """
     g_max, fao_max = optimize_gain_for_frequency(idCenter, freq, mag, seeing, tau, int(max_modes))
     wfe_max = fao_max.wfeTot[idCenter]
-
     # Extract component WFEs (RMS)
     fit_err = fao_max.wfeFit
     noise_err = fao_max.wfeN[idCenter]
-    lag_err = fao_max.wfeS
-
     # If combined noise & lag variance is significantly smaller than fitting variance,
     # reducing modes will only INCREASE fitting error and worsen total WFE.
     # We can safely lock max_modes and exit immediately.
     if noise_err < fit_err:
         return g_max, fao_max, int(max_modes)
-
     # If noise is dominant (faint star), search downwards in steps of 25
     wfe_opt = wfe_max
     g_opt = g_max
     fao_opt = fao_max
     nmodes_opt = int(max_modes)
-
     candidate_modes = np.arange(max_modes - 25, 0, -25)
-
     for nmodes_curr in candidate_modes:
         g_curr, fao_curr = optimize_gain_for_frequency(idCenter, freq, mag, seeing, tau, int(nmodes_curr))
         wfe_curr = fao_curr.wfeTot[idCenter]
-
         if wfe_curr < wfe_opt:
             wfe_opt = wfe_curr
             fao_opt = fao_curr
@@ -213,8 +208,8 @@ def optimize_gain_and_nmodes_for_frequency(idCenter, freq, mag, seeing, tau, max
         else:
             # WFE started increasing; break early due to convexity
             break
-
     return g_opt, fao_opt, nmodes_opt
+
 
 # --- Main Optimization Loops ---
 for binVal in binVals:
@@ -231,7 +226,8 @@ for binVal in binVals:
             for windSpeed in windSpeeds:
                 update_pars_file(nModes=nmodes_cap, V=windSpeed)
                 binSuffix = f'_bin{binVal+1}'
-                csv_path = f'{savedir}/eb_ekarus_rMod{rMod:1.1f}_max{maxFreq}Hz_opt{nmodes_cap}modes_delay{tau*1e+3:1.2f}ms_V{windSpeed}mps' + binSuffix + '.csv'
+                optmodes = 'opt' if optimize_nmodes else ''
+                csv_path = f'{savedir}/eb_ekarus_rMod{rMod:1.1f}_max{maxFreq}Hz_{optmodes}{nmodes_cap}modes_delay{tau*1e+3:1.2f}ms_V{windSpeed}mps' + binSuffix + '.csv'
 
                 existing_df = load_existing_results(csv_path)
                 arrays = initialize_result_arrays()
@@ -254,15 +250,21 @@ for binVal in binVals:
                         best_freq_for_mag = current_opt_freq
                         best_gain_for_mag = None
                         best_fao_for_mag = None
-                        best_nmodes_for_mag = None
+                        best_nmodes_for_mag = nmodes_cap
                         previous_best_wfe = np.inf
 
                         freq_candidates = freqs[freqs <= current_opt_freq][::-1]
 
                         for freq in freq_candidates:
-                            g_opt, fao_candidate, best_nmodes = optimize_gain_and_nmodes_for_frequency(
-                                idCenter, freq, mag, seeing, tau, nmodes_cap
-                            )
+                            if optimize_nmodes:
+                                g_opt, fao_candidate, best_nmodes = optimize_gain_and_nmodes_for_frequency(
+                                    idCenter, freq, mag, seeing, tau, nmodes_cap
+                                )
+                            else:
+                                g_opt, fao_candidate = optimize_gain_for_frequency(
+                                    idCenter, freq, mag, seeing, tau, nmodes_cap
+                                )
+                                best_nmodes = nmodes_cap
                             wfe = fao_candidate.wfeTot[idCenter]
 
                             if wfe < previous_best_wfe:
